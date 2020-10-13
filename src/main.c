@@ -14,6 +14,10 @@
 
 #define KEYBOARD_INPUT 0
 #define POTENCIOMETER_INPUT 1
+
+#define ST_STAND_BY 0
+#define ST_WARMING_UP 1
+#define ST_COOLING_DOWN 2
 // Commands
 #define CMD_EXIT 49 //1
 #define CMD_KEYBOARD_INPUT 50 // 2
@@ -26,6 +30,7 @@ struct bme280_dev dev;
 
 bool running = true;
 int input_mode = KEYBOARD_INPUT;
+int state = ST_STAND_BY;
 
 float extern_temp;
 float intern_temp;
@@ -42,6 +47,7 @@ void *watchKeyboard(void *args);
 void *watchSensors(void *args);
 
 void printMenu(WINDOW *menuWindow);
+void handleGPIO();
 
 int main(){
     // Initialize BME280
@@ -234,8 +240,29 @@ void *watchSensors(void *args){
             //     
             // }
             usleep(500000);
+            handleGPIO();
         }else{
             sleep(1);
         }
+    }
+}
+
+void handleGPIO(){
+    float histeresis_var = histeresis_temp / 2;
+
+    if(intern_temp < reference_temp - histeresis_var){
+        state = ST_WARMING_UP;
+        // liga resistor
+        // desliga ventilador
+    }else if(intern_temp > reference_temp + histeresis_var){
+        state = ST_COOLING_DOWN;
+        // liga ventilador
+        // desliga resistor
+    }else if(intern_temp < reference_temp){
+        state = ST_STAND_BY;
+        // desliga ventilador
+    }else if(intern_temp > reference_temp){
+        // desliga resistor
+        state = ST_STAND_BY;
     }
 }
