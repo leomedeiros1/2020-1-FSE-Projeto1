@@ -1,3 +1,3 @@
 int openUart();
-int getTE(float *TI);
+int getTI(float *TI);
 int getTR(float *TR);
