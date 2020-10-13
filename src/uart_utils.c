@@ -1,5 +1,6 @@
 #include <fcntl.h>
 #include <termios.h>
+#include <unistd.h>
 
 static const char UART_PATH[] = "/dev/serial0";
 
@@ -21,44 +22,60 @@ int openUart(){
     return uart0;
 }
 
-int getData(float *data){
-    int uart = openUart();
+int getTE(float *TE){
+    // int uart = openUart();
 
-    if(uart != -1){
-        char op_buffer[] = {0xA1, 8, 8, 9, 1}; // 170038891
+    // if(uart != -1){
+    //     char op_buffer[] = {0xA1, 8, 8, 9, 1}; // 170038891
 
-        int res = write(uart, &op_buffer, sizeof(op_buffer));
-        if (res < 0){
-            close(uart);
-            return -1;
-        }
+    //     int res = write(uart, &op_buffer, sizeof(op_buffer));
+    //     if (res < 0){
+    //         close(uart);
+    //         return -2;
+    //     }
 
-        usleep(250000);
+    //     usleep(250000);
 
-        res = read(uart, (void *) data++, sizeof(float));
-        if (res < 0){
-            close(uart);
-            return -2;
-        }
-        
-        op_buffer[0] = 0xA2;
+    //     res = read(uart, (void *) TE, sizeof(float));
+    //     if (res < 0){
+    //         close(uart);
+    //         return -3;
+            
+    //     }
+    // }else{
+    //     return -1
+    // }
 
-        res = write(uart, &op_buffer, sizeof(op_buffer));
-        if (res < 0){
-            close(uart);
-            return -3;
-        }
+    usleep(250000);
+    *TE = 33.5;
+    return 0;
+}
 
-        usleep(250000);
+int getTR(float *TR){
+    // int uart = openUart();
 
-        res = read(uart, (void *) data, sizeof(float));
-        if (res < 0){
-            close(uart);
-            return -4;
-        }
+    // if(uart != -1){
+    //     char op_buffer[] = {0xA2, 8, 8, 9, 1}; // 170038891
 
-        close(uart);
-    }
+    //     int res = write(uart, &op_buffer, sizeof(op_buffer));
+    //     if (res < 0){
+    //         close(uart);
+    //         return -2;
+    //     }
 
+    //     usleep(250000);
+
+    //     res = read(uart, (void *) TR, sizeof(float));
+    //     if (res < 0){
+    //         close(uart);
+    //         return -3;
+    //         
+    //     }
+    // }else{
+    //     return -1
+    // }
+
+    usleep(250000);
+    *TR = 35.5;
     return 0;
 }
