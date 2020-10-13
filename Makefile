@@ -1,5 +1,5 @@
 CC = gcc
-LDFLAGS =
+LDFLAGS = -lncurses
 BLDDIR = .
 INCDIR = $(BLDDIR)/inc
 SRCDIR = $(BLDDIR)/src
