@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <linux_userspace.c>
 #include <signal.h>
+#include <bcm2835.h>
 
 #include <uart_utils.h>
 
@@ -29,7 +30,7 @@ static const char I2C_PATH[] = "/dev/i2c-1";
 
 struct bme280_dev dev;
 
-bool running = true;
+bool running = false;
 int input_mode = KEYBOARD_INPUT;
 int state = ST_STAND_BY;
 
@@ -58,15 +59,16 @@ int main(){
     signal(SIGSTOP, safeExit);
     signal(SIGINT, safeExit);
     signal(SIGTERM, safeExit);
+
     // Initialize BME280
     struct identifier id;
-    if ((id.fd = open(I2C_PATH, O_RDWR)) < 0) {
+    if((id.fd = open(I2C_PATH, O_RDWR)) < 0) {
         endwin();
         fprintf(stderr, "Falha na abertura do canal I2C %s\n", I2C_PATH);
         exit(2);
     }
     id.dev_addr = BME280_I2C_ADDR_PRIM;
-    if (ioctl(id.fd, I2C_SLAVE, id.dev_addr) < 0) {
+    if(ioctl(id.fd, I2C_SLAVE, id.dev_addr) < 0) {
         endwin();
         fprintf(stderr, "Falha na comunicaçaõ I2C\n");
         exit(3);
@@ -77,11 +79,19 @@ int main(){
     dev.delay_us = user_delay_us;
     dev.intf_ptr = &id;
     int8_t rslt = bme280_init(&dev);
-    if (rslt != BME280_OK) {
+    if(rslt != BME280_OK) {
         endwin();
         fprintf(stderr, "Falha na inicialização do dispositivo(codigo %+d).\n", rslt);
         exit(4);
     }
+
+    // Initialize bcm2835
+    if(!bcm2835_init()){
+        printf("Erro na inicialização do bcm2835\n");
+        exit(5);
+    };
+    bcm2835_gpio_fsel(RPI_V2_GPIO_P1_18, BCM2835_GPIO_FSEL_OUTP);
+    bcm2835_gpio_fsel(RPI_V2_GPIO_P1_16, BCM2835_GPIO_FSEL_OUTP);
 
     // Initialize ncurses
     initscr();
@@ -206,17 +216,26 @@ void *watchSensors(void *args){
         if(running){
             // print data()
             if(running){
-                // mvwprintw(sensorsWindow, 1, 1, "Status: Executando");
+                mvwprintw(sensorsWindow, 1, 1, "Status: Executando");
+                if(state==ST_STAND_BY){
+                    mvwprintw(sensorsWindow, 2, 1, "> Dentro da temperatura de histerese");
+                }else if(state==ST_WARMING_UP){
+                    mvwprintw(sensorsWindow, 2, 1, "> Aquecendo");
+                }else if(state==ST_COOLING_DOWN){
+                    mvwprintw(sensorsWindow, 2, 1, "> Resfriando");
+                }else{
+                    mvwprintw(sensorsWindow, 2, 1, "> ?????????");
+                }
             }else if(reference_temp_ready){
-                // mvwprintw(sensorsWindow, 1, 1, "Status: Aguardando definição da temperatura de Histerese");
+                mvwprintw(sensorsWindow, 1, 1, "Status: Aguardando definição da temperatura de Histerese");
             }else if(histeresis_temp_ready){
-                // mvwprintw(sensorsWindow, 1, 1, "Status: Aguardando definição da temperatura de referência");
+                mvwprintw(sensorsWindow, 1, 1, "Status: Aguardando definição da temperatura de referência");
             }else{
-                // mvwprintw(sensorsWindow, 1, 1, "Status: Aguardando entrada do usuário");
+                mvwprintw(sensorsWindow, 1, 1, "Status: Aguardando entrada do usuário");
             }
-            mvwprintw(sensorsWindow, 3, 1, "Temperatura interna %.2f oC", intern_temp);
-            mvwprintw(sensorsWindow, 4, 1, "Temperatura externa %.2f oC", extern_temp);
-            mvwprintw(sensorsWindow, 5, 1, "Temperatura de referência %.2f oC", reference_temp);
+            mvwprintw(sensorsWindow, 4, 1, "Temperatura interna %.2f oC", intern_temp);
+            mvwprintw(sensorsWindow, 5, 1, "Temperatura externa %.2f oC", extern_temp);
+            mvwprintw(sensorsWindow, 6, 1, "Temperatura de referência %.2f oC", reference_temp);
             wrefresh(sensorsWindow);
             // get_sensor_data()
             float _temp;
@@ -247,7 +266,7 @@ void *watchSensors(void *args){
             //     
             // }
             usleep(500000);
-            handleGPIO();
+            if(running) handleGPIO();
         }else{
             sleep(1);
         }
@@ -260,17 +279,23 @@ void handleGPIO(){
     if(intern_temp < reference_temp - histeresis_var){
         state = ST_WARMING_UP;
         // liga resistor
+        bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 0);
         // desliga ventilador
+        bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1);
     }else if(intern_temp > reference_temp + histeresis_var){
         state = ST_COOLING_DOWN;
-        // liga ventilador
         // desliga resistor
+        bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1);
+        // liga ventilador
+        bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 0);
     }else if(intern_temp < reference_temp){
         state = ST_STAND_BY;
         // desliga ventilador
+        bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1);
     }else if(intern_temp > reference_temp){
         // desliga resistor
         state = ST_STAND_BY;
+        bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1);
     }
 }
 
@@ -279,6 +304,8 @@ void safeExit(int signal){
     pthread_cancel(keyboard_thread);
 
     //Desliga atuadores
+    bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1); // Cooler
+    bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1); // Resist
 
     echo();
     endwin();
