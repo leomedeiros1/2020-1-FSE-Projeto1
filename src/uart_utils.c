@@ -46,7 +46,7 @@ int getTI(float *TI){
     //     return -1
     // }
 
-    usleep(250000);
+    // usleep(250000);
     *TI = 33.5;
     return 0;
 }
@@ -75,7 +75,7 @@ int getTR(float *TR){
     //     return -1
     // }
 
-    usleep(250000);
+    // usleep(250000);
     *TR = 35.5;
     return 0;
 }

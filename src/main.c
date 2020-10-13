@@ -3,6 +3,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <termios.h>
+#include <fcntl.h>
+#include <linux_userspace.c>
 
 #include <uart_utils.h>
 
@@ -17,6 +20,9 @@
 #define CMD_POTENCIOMETER_INPUT 51 //3 
 #define CMD_SET_HISTERESIS 52 // 4
 
+static const char I2C_PATH[] = "/dev/i2c-1";
+
+struct bme280_dev dev;
 
 bool running = true;
 int input_mode = KEYBOARD_INPUT;
@@ -37,7 +43,11 @@ void *watchSensors(void *args);
 
 void printMenu(WINDOW *menuWindow);
 
+void initI2C();
+
 int main(){
+    // Initialize BME280
+    initI2C();
 
     // Initialize ncurses
     initscr();
@@ -84,6 +94,7 @@ int main(){
     delwin(sensorsWindow);
     delwin(menuWindow);
     delwin(inputWindow);
+    echo();
     endwin();
 
     return 0;
@@ -96,7 +107,7 @@ void printMenu(WINDOW *menuWindow){
     mvwprintw(menuWindow, 2, 1, "2 - Definir temperatura de referência manualmente");
     mvwprintw(menuWindow, 3, 1, "3 - Definir temperatura via potenciômetro");
     mvwprintw(menuWindow, 4, 1, "4 - Definir temperatura de histerese");
-    mvwprintw(menuWindow, 5, 1, "1 - Sair");
+    mvwprintw(menuWindow, 6, 1, "1 - Sair");
     wrefresh(menuWindow);
 }
 
@@ -176,10 +187,40 @@ void *watchSensors(void *args){
                 mvwprintw(sensorsWindow, 3, 1, "Temperatura interna %.2f oC", _temp);
                 // wrefresh(sensorsWindow);
             }
+            // int rslt = get_sensor_data_forced_mode(&dev, &_temp);
+            
+            // if (rslt != BME280_OK){
+            //     // fprintf(stderr, "Failed to stream sensor data (code %+d).\n", rslt);
+            //     exit(1);
+            // }
+            mvwprintw(sensorsWindow, 4, 1, "Temperatura externa %.2f oC", 25.5);
             wrefresh(sensorsWindow);
             usleep(200000);
         }else{
             sleep(1);
         }
+    }
+}
+
+void initI2C(){
+    struct identifier id;
+    if ((id.fd = open(I2C_PATH, O_RDWR)) < 0) {
+        fprintf(stderr, "Falha na abertura do canal I2C %s\n", I2C_PATH);
+        exit(2);
+    }
+    id.dev_addr = BME280_I2C_ADDR_PRIM;
+    if (ioctl(id.fd, I2C_SLAVE, id.dev_addr) < 0) {
+        fprintf(stderr, "Falha na comunicaçaõ I2C\n");
+        exit(3);
+    }
+    dev.intf = BME280_I2C_INTF;
+    dev.read = user_i2c_read;
+    dev.write = user_i2c_write;
+    dev.delay_us = user_delay_us;
+    dev.intf_ptr = &id;
+    int rslt = bme280_init(&dev);
+    if (rslt != BME280_OK) {
+        fprintf(stderr, "Falha na inicialização do dispositivo(codigo %+d).\n", rslt);
+        exit(4);
     }
 }
