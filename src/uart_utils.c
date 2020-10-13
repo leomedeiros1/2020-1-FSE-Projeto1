@@ -22,7 +22,7 @@ int openUart(){
     return uart0;
 }
 
-int getTE(float *TE){
+int getTI(float *TI){
     // int uart = openUart();
 
     // if(uart != -1){

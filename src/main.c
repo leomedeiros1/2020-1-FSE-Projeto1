@@ -162,21 +162,22 @@ void *watchSensors(void *args){
         if(running){
             // get_sensor_data()
             float _temp;
-            int res = getTE(&_temp);
+            int res = getTI(&_temp);
             // if (res)
             if(input_mode == POTENCIOMETER_INPUT){
                 res = getTR(&_temp);
-                // if (res)
+                // if (!res)
+                //   mvwprintw(sensorsWindow, 2, 1, "Temperatura referencia %.2f oC", _temp);
             }
             // print_sensors()
             // clrtoeol();
             mvwprintw(sensorsWindow, 1, 1, "Retorno %d", res);
             if(!res){
-                mvwprintw(sensorsWindow, 2, 1, "Temperatura externa %.2f oC", _temp);
+                mvwprintw(sensorsWindow, 3, 1, "Temperatura interna %.2f oC", _temp);
                 // wrefresh(sensorsWindow);
             }
             wrefresh(sensorsWindow);
-            sleep(1);
+            usleep(200000);
         }else{
             sleep(1);
         }
