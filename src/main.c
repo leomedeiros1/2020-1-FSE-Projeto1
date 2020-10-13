@@ -6,6 +6,7 @@
 #include <termios.h>
 #include <fcntl.h>
 #include <linux_userspace.c>
+#include <signal.h>
 
 #include <uart_utils.h>
 
@@ -49,7 +50,14 @@ void *watchSensors(void *args);
 void printMenu(WINDOW *menuWindow);
 void handleGPIO();
 
+void safeExit(int signal);
+
 int main(){
+    // Add signals to safe exit
+    signal(SIGKILL, safeExit);
+    signal(SIGSTOP, safeExit);
+    signal(SIGINT, safeExit);
+    signal(SIGTERM, safeExit);
     // Initialize BME280
     struct identifier id;
     if ((id.fd = open(I2C_PATH, O_RDWR)) < 0) {
@@ -120,9 +128,8 @@ int main(){
     delwin(sensorsWindow);
     delwin(menuWindow);
     delwin(inputWindow);
-    echo();
-    endwin();
 
+    safeExit(0);
     return 0;
 }
 
@@ -265,4 +272,22 @@ void handleGPIO(){
         // desliga resistor
         state = ST_STAND_BY;
     }
+}
+
+void safeExit(int signal){
+    pthread_cancel(sensors_thread);
+    pthread_cancel(keyboard_thread);
+
+    //Desliga atuadores
+
+    echo();
+    endwin();
+
+    if(signal){
+        printf("Execução abortada pelo signal: %+d\n", signal);
+    }else{
+        printf("Execução finalizada pelo usuário\n");
+    }
+
+    exit(signal);
 }
