@@ -47,7 +47,7 @@ int getTI(float *TI){
     // }
 
     usleep(250000);
-    *TE = 33.5;
+    *TI = 33.5;
     return 0;
 }
 
