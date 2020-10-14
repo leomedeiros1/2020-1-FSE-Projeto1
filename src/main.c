@@ -33,6 +33,7 @@ struct bme280_dev dev;
 bool running = false;
 int input_mode = KEYBOARD_INPUT;
 int state = ST_STAND_BY;
+int time_it = 0;
 
 float extern_temp;
 float intern_temp;
@@ -49,6 +50,7 @@ void *watchKeyboard(void *args);
 void *watchSensors(void *args);
 
 void printMenu(WINDOW *menuWindow);
+void printData(WINDOW *sensorsWindow);
 void handleGPIO();
 
 void safeExit(int signal);
@@ -197,7 +199,7 @@ void *watchKeyboard(void *args){
                 break;
             }
         }
-        if(histeresis_temp_ready && histeresis_temp_ready){
+        if(histeresis_temp_ready && reference_temp_ready){
             running=true;
         }
         wclear(inputWindow);
@@ -207,36 +209,55 @@ void *watchKeyboard(void *args){
     return NULL;
 }
 
+void printData(WINDOW *sensorsWindow){
+    if(running){
+        mvwprintw(sensorsWindow, 1, 1, "> Executando");
+        if(state==ST_STAND_BY){
+            mvwprintw(sensorsWindow, 2, 1, "Status: Dentro da temperatura de histerese");
+        }else if(state==ST_WARMING_UP){
+            mvwprintw(sensorsWindow, 2, 1, "Status: Aquecendo");
+        }else if(state==ST_COOLING_DOWN){
+            mvwprintw(sensorsWindow, 2, 1, "Status: Resfriando");
+        }else{
+            mvwprintw(sensorsWindow, 2, 1, "Status: ?????????");
+        }
+    }else if(reference_temp_ready){
+        mvwprintw(sensorsWindow, 1, 1, "> Aguardando definição da temperatura de Histerese");
+    }else if(histeresis_temp_ready){
+        mvwprintw(sensorsWindow, 1, 1, "> Aguardando definição da temperatura de referência");
+    }else{
+        mvwprintw(sensorsWindow, 1, 1, "> Aguardando definição das variáveis de controle");
+    }
+    if(input_mode == KEYBOARD_INPUT){
+        mvwprintw(sensorsWindow, 3, 1, "TR: Temperatura de referência definida manualmente");
+    }else{
+        mvwprintw(sensorsWindow, 3, 1, "TR: Temperatura de referência definida via potenciômetro");
+    }
+    if(reference_temp_ready){
+        mvwprintw(sensorsWindow, 4, 1, "Temperatura de referência: %.2f oC", reference_temp);
+    }else{
+        mvwprintw(sensorsWindow, 4, 1, "Temperatura de referência: Não definida");
+    }
+    if(histeresis_temp_ready){
+        mvwprintw(sensorsWindow, 5, 1, "Histerese do sistema: %.2f oC", histeresis_temp);
+    }else{
+        mvwprintw(sensorsWindow, 5, 1, "Histerese do sistema: Não definida");
+    }
+
+    mvwprintw(sensorsWindow, 6, 1, "Temperatura interna %.2f oC", intern_temp);
+    mvwprintw(sensorsWindow, 7, 1, "Temperatura externa %.2f oC", extern_temp);
+    wrefresh(sensorsWindow);
+}
+
 void *watchSensors(void *args){
     WINDOW *sensorsWindow = (WINDOW *) args;
     while(true){
         wclear(sensorsWindow);
         box(sensorsWindow, 0, 0);
         wrefresh(sensorsWindow);
+        printData(sensorsWindow);
+        
         if(running){
-            // print data()
-            if(running){
-                mvwprintw(sensorsWindow, 1, 1, "Status: Executando");
-                if(state==ST_STAND_BY){
-                    mvwprintw(sensorsWindow, 2, 1, "> Dentro da temperatura de histerese");
-                }else if(state==ST_WARMING_UP){
-                    mvwprintw(sensorsWindow, 2, 1, "> Aquecendo");
-                }else if(state==ST_COOLING_DOWN){
-                    mvwprintw(sensorsWindow, 2, 1, "> Resfriando");
-                }else{
-                    mvwprintw(sensorsWindow, 2, 1, "> ?????????");
-                }
-            }else if(reference_temp_ready){
-                mvwprintw(sensorsWindow, 1, 1, "Status: Aguardando definição da temperatura de Histerese");
-            }else if(histeresis_temp_ready){
-                mvwprintw(sensorsWindow, 1, 1, "Status: Aguardando definição da temperatura de referência");
-            }else{
-                mvwprintw(sensorsWindow, 1, 1, "Status: Aguardando entrada do usuário");
-            }
-            mvwprintw(sensorsWindow, 4, 1, "Temperatura interna %.2f oC", intern_temp);
-            mvwprintw(sensorsWindow, 5, 1, "Temperatura externa %.2f oC", extern_temp);
-            mvwprintw(sensorsWindow, 6, 1, "Temperatura de referência %.2f oC", reference_temp);
-            wrefresh(sensorsWindow);
             // get_sensor_data()
             float _temp;
             int res = getTI(&_temp);
@@ -249,6 +270,8 @@ void *watchSensors(void *args){
                     reference_temp = _temp;
                     reference_temp_ready = true;
                 }
+            }else{
+                usleep(500000);
             }
             
             mvwprintw(sensorsWindow, 1, 1, "Retorno %d", res);
@@ -256,16 +279,13 @@ void *watchSensors(void *args){
             int rslt = get_sensor_data_forced_mode(&dev, &_temp);
             if (rslt == BME280_OK){
                 extern_temp = _temp;
+                reference_temp_ready = true;
             }else{
                 endwin();
                 fprintf(stderr, "Falha na leitura do sensor BME280 (code %+d).\n", rslt);
-                // exit(1);
+                exit(1);
             }
-            
-            // if (rslt != BME280_OK){
-            //     
-            // }
-            usleep(500000);
+            // usleep(500000);
             if(running) handleGPIO();
         }else{
             sleep(1);
@@ -296,6 +316,38 @@ void handleGPIO(){
         // desliga resistor
         state = ST_STAND_BY;
         bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1);
+    }
+
+    if(++time_it == 4){
+        time_it=0;
+        // Open csv
+        FILE *arq;
+        arq = fopen("./data.csv", "r+");
+        if(arq){
+            fseek(arq, 0, SEEK_END);
+        }
+        else{
+            arq = fopen("./data.csv", "a");
+            // Header
+            fprintf(arq, "Temperatura referência (oC), Temperatura interna (oC), Temperatura externa (oC), Data e Hora\n");
+        }
+
+        if(arq){
+            time_t rawtime;
+            struct tm * timeinfo;
+
+            time(&rawtime);
+            timeinfo = localtime(&rawtime);
+
+            fprintf(arq, "%0.2lf, %0.2lf, %0.2lf, %s", reference_temp, intern_temp, extern_temp, asctime (timeinfo));
+        }
+        else{
+            printf("Unable to open CSV file.\n");
+            exit(-1);
+        }
+
+        // Close CSV
+        fclose(arq); 
     }
 }
 
