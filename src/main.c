@@ -10,6 +10,7 @@
 #include <bcm2835.h>
 
 #include <uart_utils.h>
+#include <i2clcd.h>
 
 #define MIN_ROWS 24
 #define MIN_COLS 90
@@ -27,6 +28,7 @@
 #define CMD_SET_HISTERESIS 52 // 4
 
 static const char I2C_PATH[] = "/dev/i2c-1";
+static const char CSV_DATA_PATH[] = "./data.csv";
 
 struct bme280_dev dev;
 
@@ -52,6 +54,7 @@ void *watchSensors(void *args);
 void printMenu(WINDOW *menuWindow);
 void printData(WINDOW *sensorsWindow);
 void handleGPIO();
+void writeCSV();
 
 void safeExit(int signal);
 
@@ -61,6 +64,9 @@ int main(){
     signal(SIGSTOP, safeExit);
     signal(SIGINT, safeExit);
     signal(SIGTERM, safeExit);
+
+    // Initialize i2clcd
+    lcd_init();
 
     // Initialize BME280
     struct identifier id;
@@ -145,17 +151,6 @@ int main(){
     return 0;
 }
 
-void printMenu(WINDOW *menuWindow){
-    box(menuWindow, 0, 0);
-    wrefresh(menuWindow);
-    mvwprintw(menuWindow, 1, 1, "Lista de comandos disponíveis:");
-    mvwprintw(menuWindow, 2, 1, "2 - Definir temperatura de referência manualmente");
-    mvwprintw(menuWindow, 3, 1, "3 - Definir temperatura via potenciômetro");
-    mvwprintw(menuWindow, 4, 1, "4 - Definir temperatura de histerese");
-    mvwprintw(menuWindow, 6, 1, "1 - Sair");
-    wrefresh(menuWindow);
-}
-
 void *watchKeyboard(void *args){
     WINDOW *inputWindow = (WINDOW *) args;
     int op_code;
@@ -182,6 +177,7 @@ void *watchKeyboard(void *args){
             }
             case CMD_POTENCIOMETER_INPUT:{
                 input_mode = POTENCIOMETER_INPUT;
+                reference_temp_ready = true;
                 break;
             }
             case CMD_SET_HISTERESIS:{
@@ -207,6 +203,156 @@ void *watchKeyboard(void *args){
         wrefresh(inputWindow);
     }
     return NULL;
+}
+
+void *watchSensors(void *args){
+    WINDOW *sensorsWindow = (WINDOW *) args;
+    while(true){
+        wclear(sensorsWindow);
+        box(sensorsWindow, 0, 0);
+        wrefresh(sensorsWindow);
+
+        printData(sensorsWindow);
+        
+        if(running){
+            // get_sensor_data()
+            float _temp;
+            int res = getTI(&_temp);
+            if (!res){
+                intern_temp = _temp;
+            }
+            if(input_mode == POTENCIOMETER_INPUT){
+                res = getTR(&_temp);
+                if (!res){
+                    reference_temp = _temp;
+                }
+            }else{
+                usleep(250000);
+            }
+            
+            mvwprintw(sensorsWindow, 1, 1, "Retorno %d", res);
+            
+            int rslt = get_sensor_data_forced_mode(&dev, &_temp);
+            if (rslt == BME280_OK){
+                extern_temp = _temp;
+                reference_temp_ready = true;
+            }else{
+                endwin();
+                fprintf(stderr, "Falha na leitura do sensor BME280 (code %+d).\n", rslt);
+                exit(1);
+            }
+
+            handleGPIO();
+        }else{
+            usleep(500000);
+        }
+    }
+}
+
+void handleGPIO(){
+    // Controle
+    float histeresis_var = histeresis_temp / 2;
+    if(intern_temp < reference_temp - histeresis_var){
+        state = ST_WARMING_UP;
+        // liga resistor
+        bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 0);
+        // desliga ventilador
+        bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1);
+    }else if(intern_temp > reference_temp + histeresis_var){
+        state = ST_COOLING_DOWN;
+        // desliga resistor
+        bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1);
+        // liga ventilador
+        bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 0);
+    }else if(intern_temp < reference_temp){
+        state = ST_STAND_BY;
+        // desliga ventilador
+        bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1);
+    }else if(intern_temp > reference_temp){
+        // desliga resistor
+        state = ST_STAND_BY;
+        bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1);
+    }
+
+    // LCD
+    char STR_LINE1[16] = "";
+    sprintf(STR_LINE1, "TR %.2f ", reference_temp);
+    lcdLoc(LINE1);
+    typeln(STR_LINE1);
+
+    char STR_LINE2[16] = "";
+    sprintf(STR_LINE2, "TI%.2f TE%.2f ", intern_temp, extern_temp);
+    lcdLoc(LINE2);
+    typeln(STR_LINE2);
+
+    // CSV log
+    if(++time_it == 4){
+        time_it=0;
+        writeCSV();
+    }
+}
+
+void safeExit(int signal){
+    pthread_cancel(sensors_thread);
+    pthread_cancel(keyboard_thread);
+
+    //Desliga atuadores
+    bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1); // Cooler
+    bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1); // Resist
+
+    echo();
+    endwin();
+
+    if(signal){
+        printf("Execução abortada pelo signal: %d\n", signal);
+    }else{
+        printf("Execução finalizada pelo usuário\n");
+    }
+
+    exit(signal);
+}
+
+void writeCSV(){
+    // Open csv
+    FILE *arq;
+    arq = fopen(CSV_DATA_PATH, "r+");
+    if(arq){
+        fseek(arq, 0, SEEK_END);
+    }
+    else{
+        arq = fopen("./data.csv", "a");
+        // Header
+        fprintf(arq, "Temperatura referência (oC), Temperatura interna (oC), Temperatura externa (oC), Data e Hora\n");
+    }
+
+    if(arq){
+        time_t rawtime;
+        struct tm * timeinfo;
+
+        time(&rawtime);
+        timeinfo = localtime(&rawtime);
+
+        fprintf(arq, "%0.2lf, %0.2lf, %0.2lf, %s", reference_temp, intern_temp, extern_temp, asctime (timeinfo));
+    }
+    else{
+        endwin();
+        printf("Não foi possivel abrir o arquivo para csv.\n");
+        exit(-1);
+    }
+
+    // Close CSV
+    fclose(arq); 
+}
+
+void printMenu(WINDOW *menuWindow){
+    box(menuWindow, 0, 0);
+    wrefresh(menuWindow);
+    mvwprintw(menuWindow, 1, 1, "Lista de comandos disponíveis:");
+    mvwprintw(menuWindow, 2, 1, "2 - Definir temperatura de referência manualmente");
+    mvwprintw(menuWindow, 3, 1, "3 - Definir temperatura via potenciômetro");
+    mvwprintw(menuWindow, 4, 1, "4 - Definir temperatura de histerese");
+    mvwprintw(menuWindow, 6, 1, "1 - Sair");
+    wrefresh(menuWindow);
 }
 
 void printData(WINDOW *sensorsWindow){
@@ -247,126 +393,4 @@ void printData(WINDOW *sensorsWindow){
     mvwprintw(sensorsWindow, 6, 1, "Temperatura interna %.2f oC", intern_temp);
     mvwprintw(sensorsWindow, 7, 1, "Temperatura externa %.2f oC", extern_temp);
     wrefresh(sensorsWindow);
-}
-
-void *watchSensors(void *args){
-    WINDOW *sensorsWindow = (WINDOW *) args;
-    while(true){
-        wclear(sensorsWindow);
-        box(sensorsWindow, 0, 0);
-        wrefresh(sensorsWindow);
-        printData(sensorsWindow);
-        
-        if(running){
-            // get_sensor_data()
-            float _temp;
-            int res = getTI(&_temp);
-            if (!res){
-                intern_temp = _temp;
-            }
-            if(input_mode == POTENCIOMETER_INPUT){
-                res = getTR(&_temp);
-                if (!res){
-                    reference_temp = _temp;
-                    reference_temp_ready = true;
-                }
-            }else{
-                usleep(500000);
-            }
-            
-            mvwprintw(sensorsWindow, 1, 1, "Retorno %d", res);
-            
-            int rslt = get_sensor_data_forced_mode(&dev, &_temp);
-            if (rslt == BME280_OK){
-                extern_temp = _temp;
-                reference_temp_ready = true;
-            }else{
-                endwin();
-                fprintf(stderr, "Falha na leitura do sensor BME280 (code %+d).\n", rslt);
-                exit(1);
-            }
-            // usleep(500000);
-            if(running) handleGPIO();
-        }else{
-            sleep(1);
-        }
-    }
-}
-
-void handleGPIO(){
-    float histeresis_var = histeresis_temp / 2;
-
-    if(intern_temp < reference_temp - histeresis_var){
-        state = ST_WARMING_UP;
-        // liga resistor
-        bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 0);
-        // desliga ventilador
-        bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1);
-    }else if(intern_temp > reference_temp + histeresis_var){
-        state = ST_COOLING_DOWN;
-        // desliga resistor
-        bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1);
-        // liga ventilador
-        bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 0);
-    }else if(intern_temp < reference_temp){
-        state = ST_STAND_BY;
-        // desliga ventilador
-        bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1);
-    }else if(intern_temp > reference_temp){
-        // desliga resistor
-        state = ST_STAND_BY;
-        bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1);
-    }
-
-    if(++time_it == 4){
-        time_it=0;
-        // Open csv
-        FILE *arq;
-        arq = fopen("./data.csv", "r+");
-        if(arq){
-            fseek(arq, 0, SEEK_END);
-        }
-        else{
-            arq = fopen("./data.csv", "a");
-            // Header
-            fprintf(arq, "Temperatura referência (oC), Temperatura interna (oC), Temperatura externa (oC), Data e Hora\n");
-        }
-
-        if(arq){
-            time_t rawtime;
-            struct tm * timeinfo;
-
-            time(&rawtime);
-            timeinfo = localtime(&rawtime);
-
-            fprintf(arq, "%0.2lf, %0.2lf, %0.2lf, %s", reference_temp, intern_temp, extern_temp, asctime (timeinfo));
-        }
-        else{
-            printf("Unable to open CSV file.\n");
-            exit(-1);
-        }
-
-        // Close CSV
-        fclose(arq); 
-    }
-}
-
-void safeExit(int signal){
-    pthread_cancel(sensors_thread);
-    pthread_cancel(keyboard_thread);
-
-    //Desliga atuadores
-    bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1); // Cooler
-    bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1); // Resist
-
-    echo();
-    endwin();
-
-    if(signal){
-        printf("Execução abortada pelo signal: %+d\n", signal);
-    }else{
-        printf("Execução finalizada pelo usuário\n");
-    }
-
-    exit(signal);
 }
