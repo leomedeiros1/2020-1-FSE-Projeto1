@@ -82,6 +82,7 @@ int main(){
     sem_init(&hold_sensors, 0, 0);
     sem_init(&hold_logger, 0, 0);
     sem_init(&hold_lcd, 0, 0);
+    sem_init(&hold_control, 0, 0);
 
     // Add signals to safe exit
     signal(SIGKILL, safeExit);
@@ -365,6 +366,7 @@ void *handleGPIO(void *args){
 }
 
 void safeExit(int signal){
+    // Finish threads
     pthread_cancel(sensors_thread);
     pthread_cancel(keyboard_thread);
     pthread_cancel(log_thread);
