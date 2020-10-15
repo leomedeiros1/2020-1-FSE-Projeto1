@@ -34,7 +34,7 @@ int getTI(float *TI){
             return -2;
         }
 
-        usleep(250000);
+        usleep(200000);
 
         res = read(uart, (void *) TI, sizeof(float));
         if (res < 0){
@@ -63,7 +63,7 @@ int getTR(float *TR){
             return -2;
         }
 
-        usleep(250000);
+        usleep(200000);
 
         res = read(uart, (void *) TR, sizeof(float));
         if (res < 0){

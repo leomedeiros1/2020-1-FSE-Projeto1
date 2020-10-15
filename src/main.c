@@ -8,6 +8,7 @@
 #include <linux_userspace.c>
 #include <signal.h>
 #include <bcm2835.h>
+#include <semaphore.h>
 
 #include <uart_utils.h>
 #include <i2clcd.h>
@@ -16,16 +17,16 @@
 #define MIN_COLS 90
 
 #define KEYBOARD_INPUT 0
-#define POTENCIOMETER_INPUT 1
+#define POTENTIOMETER_INPUT 1
 
 #define ST_STAND_BY 0
 #define ST_WARMING_UP 1
 #define ST_COOLING_DOWN 2
 // Commands
-#define CMD_EXIT 49 //1
-#define CMD_KEYBOARD_INPUT 50 // 2
-#define CMD_POTENCIOMETER_INPUT 51 //3 
-#define CMD_SET_HISTERESIS 52 // 4
+#define CMD_EXIT 48 // 0
+#define CMD_KEYBOARD_INPUT 49 // 1
+#define CMD_POTENTIOMETER_INPUT 50 // 2 
+#define CMD_SET_HISTERESIS 51 // 3
 
 static const char I2C_PATH[] = "/dev/i2c-1";
 static const char CSV_DATA_PATH[] = "./data.csv";
@@ -43,22 +44,45 @@ float reference_temp;
 bool reference_temp_ready = false;
 float histeresis_temp;
 bool histeresis_temp_ready = false;
-float potenciometer;
+float potentiometer;
 
 pthread_t keyboard_thread;
 pthread_t sensors_thread;
+pthread_t log_thread;
+pthread_t lcd_thread;
+pthread_t control_thread;
+
+sem_t hold_sensors;
+sem_t hold_logger;
+sem_t hold_lcd;
+sem_t hold_control;
 
 void *watchKeyboard(void *args);
 void *watchSensors(void *args);
+void *handleCSV(void *args);
+void *handleLCD(void *args);
+void *handleGPIO(void *args);
 
 void printMenu(WINDOW *menuWindow);
 void printData(WINDOW *sensorsWindow);
-void handleGPIO();
 void writeCSV();
+
+void handleAlarm(int signal);
+
+int startThreads(WINDOW *inputWindow, WINDOW *sensorsWindow);
 
 void safeExit(int signal);
 
 int main(){
+    // Initialize Alarm
+    signal(SIGALRM, handleAlarm);
+    ualarm(500000, 500000);
+
+    // Initialize semaphores
+    sem_init(&hold_sensors, 0, 0);
+    sem_init(&hold_logger, 0, 0);
+    sem_init(&hold_lcd, 0, 0);
+
     // Add signals to safe exit
     signal(SIGKILL, safeExit);
     signal(SIGSTOP, safeExit);
@@ -95,7 +119,7 @@ int main(){
 
     // Initialize bcm2835
     if(!bcm2835_init()){
-        printf("Erro na inicialização do bcm2835\n");
+        fprintf(stderr, "Erro na inicialização do bcm2835\n");
         exit(5);
     };
     bcm2835_gpio_fsel(RPI_V2_GPIO_P1_18, BCM2835_GPIO_FSEL_OUTP);
@@ -109,6 +133,7 @@ int main(){
     curs_set(0);
     refresh();
 
+    // Verify window size
     int rows, columns;
     getmaxyx(stdscr, rows, columns);
     while(rows < MIN_ROWS || columns < MIN_COLS){
@@ -128,18 +153,7 @@ int main(){
 
     printMenu(menuWindow);
 
-    if(pthread_create(&keyboard_thread, NULL, watchKeyboard, (void *) inputWindow)){
-        endwin();
-        printf("ERRO: Falha na criacao de thread(1)\n");
-        return -1;
-    }
-
-
-    if(pthread_create(&sensors_thread, NULL, watchSensors, (void *) sensorsWindow)){
-        endwin();
-        printf("ERRO: Falha na criacao de thread(2)\n");
-        return -2;
-    } 
+    startThreads(inputWindow, sensorsWindow);
 
     pthread_join(keyboard_thread, NULL);
 
@@ -148,6 +162,47 @@ int main(){
     delwin(inputWindow);
 
     safeExit(0);
+    return 0;
+}
+
+void handleAlarm(int signal){
+    sem_post(&hold_sensors);
+    sem_post(&hold_logger);
+    sem_post(&hold_lcd);
+    sem_post(&hold_control);
+}
+
+int startThreads(WINDOW *inputWindow, WINDOW *sensorsWindow){
+    if(pthread_create(&keyboard_thread, NULL, watchKeyboard, (void *) inputWindow)){
+        endwin();
+        fprintf(stderr, "ERRO: Falha na criacao de thread(1)\n");
+        exit(-1);
+    }
+
+    if(pthread_create(&sensors_thread, NULL, watchSensors, (void *) sensorsWindow)){
+        endwin();
+        fprintf(stderr, "ERRO: Falha na criacao de thread(2)\n");
+        exit(-2);
+    } 
+
+    if(pthread_create(&log_thread, NULL, handleCSV, NULL)){
+        endwin();
+        fprintf(stderr, "ERRO: Falha na criacao de thread(3)\n");
+        exit(-3);
+    }
+
+    if(pthread_create(&lcd_thread, NULL, handleLCD, NULL)){
+        endwin();
+        fprintf(stderr, "ERRO: Falha na criacao de thread(4)\n");
+        exit(-4);
+    }
+
+    if(pthread_create(&lcd_thread, NULL, handleGPIO, NULL)){
+        endwin();
+        fprintf(stderr, "ERRO: Falha na criacao de thread(5)\n");
+        exit(-5);
+    }
+
     return 0;
 }
 
@@ -175,8 +230,8 @@ void *watchKeyboard(void *args){
 
                 break;
             }
-            case CMD_POTENCIOMETER_INPUT:{
-                input_mode = POTENCIOMETER_INPUT;
+            case CMD_POTENTIOMETER_INPUT:{
+                input_mode = POTENTIOMETER_INPUT;
                 reference_temp_ready = true;
                 break;
             }
@@ -208,6 +263,7 @@ void *watchKeyboard(void *args){
 void *watchSensors(void *args){
     WINDOW *sensorsWindow = (WINDOW *) args;
     while(true){
+        sem_wait(&hold_sensors);
         wclear(sensorsWindow);
         box(sensorsWindow, 0, 0);
         wrefresh(sensorsWindow);
@@ -221,13 +277,13 @@ void *watchSensors(void *args){
             if (!res){
                 intern_temp = _temp;
             }
-            if(input_mode == POTENCIOMETER_INPUT){
+            if(input_mode == POTENTIOMETER_INPUT){
                 res = getTR(&_temp);
                 if (!res){
                     reference_temp = _temp;
                 }
             }else{
-                usleep(250000);
+                // usleep(250000);
             }
             
             mvwprintw(sensorsWindow, 1, 1, "Retorno %d", res);
@@ -242,61 +298,80 @@ void *watchSensors(void *args){
                 exit(1);
             }
 
-            handleGPIO();
+            // // handleGPIO();
         }else{
-            usleep(500000);
+            // usleep(500000);
         }
     }
 }
 
-void handleGPIO(){
-    // Controle
-    float histeresis_var = histeresis_temp / 2;
-    if(intern_temp < reference_temp - histeresis_var){
-        state = ST_WARMING_UP;
-        // liga resistor
-        bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 0);
-        // desliga ventilador
-        bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1);
-    }else if(intern_temp > reference_temp + histeresis_var){
-        state = ST_COOLING_DOWN;
-        // desliga resistor
-        bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1);
-        // liga ventilador
-        bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 0);
-    }else if(intern_temp < reference_temp){
-        state = ST_STAND_BY;
-        // desliga ventilador
-        bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1);
-    }else if(intern_temp > reference_temp){
-        // desliga resistor
-        state = ST_STAND_BY;
-        bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1);
+void *handleCSV(void *args){
+    while(true){
+        sem_wait(&hold_logger);
+        if(++time_it == 4){
+            time_it=0;
+            writeCSV();
+        }
     }
 
-    // LCD
-    char STR_LINE1[16] = "";
-    sprintf(STR_LINE1, "TR %.2f ", reference_temp);
-    lcdLoc(LINE1);
-    typeln(STR_LINE1);
+    return NULL;
+}
 
-    char STR_LINE2[16] = "";
-    sprintf(STR_LINE2, "TI%.2f TE%.2f ", intern_temp, extern_temp);
-    lcdLoc(LINE2);
-    typeln(STR_LINE2);
+void *handleLCD(void *args){
+    while(true){
+        sem_wait(&hold_lcd);
+        char STR_LINE1[16] = "";
+        sprintf(STR_LINE1, "TR %.2f ", reference_temp);
+        lcdLoc(LINE1);
+        typeln(STR_LINE1);
 
-    // CSV log
-    if(++time_it == 4){
-        time_it=0;
-        writeCSV();
+        char STR_LINE2[16] = "";
+        sprintf(STR_LINE2, "TI%.2f TE%.2f ", intern_temp, extern_temp);
+        lcdLoc(LINE2);
+        typeln(STR_LINE2);
+
     }
+    return NULL;
+}
+
+void *handleGPIO(void *args){
+    while(true){
+        sem_wait(&hold_control);
+        // Controle
+        float histeresis_var = histeresis_temp / 2;
+        if(intern_temp < reference_temp - histeresis_var){
+            state = ST_WARMING_UP;
+            // liga resistor
+            bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 0);
+            // desliga ventilador
+            bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1);
+        }else if(intern_temp > reference_temp + histeresis_var){
+            state = ST_COOLING_DOWN;
+            // desliga resistor
+            bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1);
+            // liga ventilador
+            bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 0);
+        }else if(intern_temp < reference_temp){
+            state = ST_STAND_BY;
+            // desliga ventilador
+            bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1);
+        }else if(intern_temp > reference_temp){
+            // desliga resistor
+            state = ST_STAND_BY;
+            bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1);
+        }
+    }
+    return NULL;
 }
 
 void safeExit(int signal){
     pthread_cancel(sensors_thread);
     pthread_cancel(keyboard_thread);
+    pthread_cancel(log_thread);
+    pthread_cancel(lcd_thread);
+    pthread_cancel(control_thread);
 
-    //Desliga atuadores
+    // Turn actuators off
     bcm2835_gpio_write(RPI_V2_GPIO_P1_18, 1); // Cooler
     bcm2835_gpio_write(RPI_V2_GPIO_P1_16, 1); // Resist
 
@@ -348,10 +423,10 @@ void printMenu(WINDOW *menuWindow){
     box(menuWindow, 0, 0);
     wrefresh(menuWindow);
     mvwprintw(menuWindow, 1, 1, "Lista de comandos disponíveis:");
-    mvwprintw(menuWindow, 2, 1, "2 - Definir temperatura de referência manualmente");
-    mvwprintw(menuWindow, 3, 1, "3 - Definir temperatura via potenciômetro");
-    mvwprintw(menuWindow, 4, 1, "4 - Definir temperatura de histerese");
-    mvwprintw(menuWindow, 6, 1, "1 - Sair");
+    mvwprintw(menuWindow, 2, 1, "1 - Definir temperatura de referência manualmente");
+    mvwprintw(menuWindow, 3, 1, "2 - Definir temperatura de referência via potenciômetro");
+    mvwprintw(menuWindow, 4, 1, "3 - Definir temperatura de histerese");
+    mvwprintw(menuWindow, 6, 1, "0 ou CTRL+C - Sair");
     wrefresh(menuWindow);
 }
 
